@@ -33,11 +33,14 @@ if (CSS.supports('selector(:has(*))')) {
     interactableSelectors.push('#extensionsMenu div:has(.extensionsMenuExtensionButton)');
 }
 
+let interactableSelector = interactableSelectors.join(',');
+
 export const INTERACTABLE_CONTROL_CLASS = 'interactable';
 export const CUSTOM_INTERACTABLE_CONTROL_CLASS = 'custom_interactable';
 
 export const NOT_FOCUSABLE_CONTROL_CLASS = 'not_focusable';
 export const DISABLED_CONTROL_CLASS = 'disabled';
+const nonFocusableSelector = `.${NOT_FOCUSABLE_CONTROL_CLASS}, .${DISABLED_CONTROL_CLASS}`;
 
 /**
  * An observer that will check if any new interactables or scroll reset containers are added to the body
@@ -88,6 +91,7 @@ function handleNodeChange(node) {
  */
 export function registerInteractableType(interactableSelector, { disabledByDefault = false, notFocusableByDefault = false } = {}) {
     interactableSelectors.push(interactableSelector);
+    updateInteractableSelector();
 
     const interactables = document.querySelectorAll(interactableSelector);
 
@@ -101,6 +105,10 @@ export function registerInteractableType(interactableSelector, { disabledByDefau
     makeKeyboardInteractable(...interactables);
 }
 
+function updateInteractableSelector() {
+    interactableSelector = interactableSelectors.join(',');
+}
+
 /**
  * Checks if the given control is a keyboard-enabled interactable.
  *
@@ -109,7 +117,7 @@ export function registerInteractableType(interactableSelector, { disabledByDefau
  */
 export function isKeyboardInteractable(control) {
     // Check if this control matches any of the selectors
-    return interactableSelectors.some(selector => control.matches(selector));
+    return control.matches(interactableSelector);
 }
 
 /**
@@ -130,28 +138,13 @@ export function makeKeyboardInteractable(...interactables) {
             interactable.classList.add(INTERACTABLE_CONTROL_CLASS);
         }
 
-        /**
-         * Check if the element or any parent element has 'disabled' or 'not_focusable' class
-         * @param {Element} el
-         * @returns {boolean}
-         */
-        const hasDisabledOrNotFocusableAncestor = (el) => {
-            while (el) {
-                if (el.classList.contains(NOT_FOCUSABLE_CONTROL_CLASS) || el.classList.contains(DISABLED_CONTROL_CLASS)) {
-                    return true;
-                }
-                el = el.parentElement;
-            }
-            return false;
-        };
-
         // Set/remove the tabindex accordingly to the classes. Remembering if it had a custom value.
-        if (!hasDisabledOrNotFocusableAncestor(interactable)) {
+        if (!interactable.closest(nonFocusableSelector)) {
             if (!interactable.hasAttribute('tabindex')) {
                 const tabIndex = interactable.getAttribute('data-original-tabindex') ?? '0';
                 interactable.setAttribute('tabindex', tabIndex);
             }
-        } else {
+        } else if (interactable.hasAttribute('tabindex')) {
             interactable.setAttribute('data-original-tabindex', interactable.getAttribute('tabindex'));
             interactable.removeAttribute('tabindex');
         }
@@ -175,15 +168,20 @@ function initializeInteractables(element = document) {
  * @returns {HTMLElement[]} An array containing all the interactables that match the given selectors
  */
 function getAllInteractables(element) {
-    // Query each selector individually and combine all to a big array to return
-    return [].concat(...interactableSelectors.map(selector => Array.from(element.querySelectorAll(`${selector}`))));
+    // A combined selector visits the subtree once and returns each control once,
+    // even when it matches several of the built-in or extension selectors.
+    return Array.from(element.querySelectorAll(interactableSelector));
 }
+
+const initializedScrollResetContainers = new WeakSet();
 
 /**
  * Function to apply scroll reset behavior to a container
  * @param {Element} container - The container
  */
 const applyScrollResetBehavior = (container) => {
+    if (initializedScrollResetContainers.has(container)) return;
+    initializedScrollResetContainers.add(container);
     container.addEventListener('focusout', (e) => {
         setTimeout(() => {
             const focusedElement = document.activeElement;
