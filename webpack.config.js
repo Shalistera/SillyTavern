@@ -2,19 +2,41 @@ import process from 'node:process';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import isDocker from 'is-docker';
 import webpack from 'webpack';
 import { serverDirectory } from './src/server-directory.js';
-import { getVersion, color } from './src/util.js';
+import { color } from './src/util.js';
+
+const configFile = fileURLToPath(import.meta.url);
+let webpackCacheVersion;
 
 /**
- * Generate a cache version string based on the application version, Git revision, and Webpack version.
+ * Identify the library build inputs, independently of unrelated Git commits.
+ * Webpack also validates imported modules using its normal filesystem snapshots.
  * @returns {string} The cache version string.
  */
 function getWebpackCacheVersion() {
-    return crypto.createHash('shake256', { outputLength: 8 })
-        .update(JSON.stringify([appVersion.pkgVersion, appVersion.gitRevision, webpack.version]))
-        .digest('hex');
+    if (webpackCacheVersion) {
+        return webpackCacheVersion;
+    }
+
+    const hash = crypto.createHash('shake256', { outputLength: 8 })
+        .update(JSON.stringify([webpack.version, process.versions.node]));
+    const buildInputs = [configFile, 'public/lib.js', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml'];
+    for (const file of buildInputs) {
+        const filePath = path.resolve(serverDirectory, file);
+        // Optional lockfiles cover installations using other package managers.
+        // Delimit each input so changing file boundaries cannot share a hash.
+        if (fs.existsSync(filePath)) {
+            const contents = fs.readFileSync(filePath);
+            hash.update(`file:${contents.length}\0`).update(contents);
+        } else {
+            hash.update('missing\0');
+        }
+    }
+    webpackCacheVersion = hash.digest('hex');
+    return webpackCacheVersion;
 }
 
 /**
@@ -47,8 +69,6 @@ function pruneWebpackCache(webpackRoot, currentCacheVersion) {
         console.error('Failed to read Webpack cache directories for pruning.', error);
     }
 }
-
-const appVersion = await getVersion();
 
 /**
  * Get the Webpack configuration for the public/lib.js file.
@@ -98,6 +118,9 @@ export default function getPublicLibConfig({ forceDist = false, pruneCache = fal
             cacheDirectory: cacheDirectory,
             store: 'pack',
             compression: 'gzip',
+            buildDependencies: {
+                config: [configFile],
+            },
         },
         devtool: false,
         watch: false,
