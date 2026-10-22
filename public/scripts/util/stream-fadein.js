@@ -1,5 +1,64 @@
 import { morphdom } from '../../lib.js';
 
+// A bounded cache of detached templates avoids rebuilding the same word spans
+// in completed paragraphs on every token. Callers only receive clones.
+const segmentTemplates = new Map();
+const segmenters = new Map();
+const MAX_CACHED_SEGMENTS = 4096;
+const MAX_CACHED_CHARACTERS = 65536;
+const MAX_CACHED_TEMPLATES = 128;
+let cachedSegments = 0;
+let cachedCharacters = 0;
+
+/**
+ * @param {string} text Text node contents
+ * @param {'word'|'grapheme'|'sentence'} granularity Segmentation granularity
+ * @returns {DocumentFragment} Detached spans, owned by the caller
+ */
+function createTextSegments(text, granularity) {
+    const key = `${granularity}:${text}`;
+    const cached = segmentTemplates.get(key);
+    if (cached) {
+        segmentTemplates.delete(key);
+        segmentTemplates.set(key, cached);
+        return /** @type {DocumentFragment} */ (cached.fragment.cloneNode(true));
+    }
+
+    let segmenter = segmenters.get(granularity);
+    if (!segmenter) {
+        segmenter = new Intl.Segmenter('en-US', { granularity });
+        segmenters.set(granularity, segmenter);
+    }
+    const fragment = document.createDocumentFragment();
+    let segmentCount = 0;
+    for (const segment of segmenter.segment(text)) {
+        const span = document.createElement('span');
+        span.innerText = segment.segment;
+        span.className = 'text_segment';
+        fragment.appendChild(span);
+        segmentCount++;
+    }
+
+    // Large single text nodes still render normally without retaining another
+    // copy. Bound both source strings and the much heavier DOM span templates.
+    if (segmentCount > MAX_CACHED_SEGMENTS || text.length > MAX_CACHED_CHARACTERS) {
+        return fragment;
+    }
+    while (segmentTemplates.size >= MAX_CACHED_TEMPLATES
+        || cachedSegments + segmentCount > MAX_CACHED_SEGMENTS
+        || cachedCharacters + text.length > MAX_CACHED_CHARACTERS) {
+        const oldestKey = segmentTemplates.keys().next().value;
+        const oldest = segmentTemplates.get(oldestKey);
+        cachedSegments -= oldest.segmentCount;
+        cachedCharacters -= oldest.textLength;
+        segmentTemplates.delete(oldestKey);
+    }
+    segmentTemplates.set(key, { fragment, segmentCount, textLength: text.length });
+    cachedSegments += segmentCount;
+    cachedCharacters += text.length;
+    return /** @type {DocumentFragment} */ (fragment.cloneNode(true));
+}
+
 /**
  * Creates a content writer scoped to one streaming handler.
  * Formatting still runs on every update; only identical DOM writes are skipped.
@@ -48,8 +107,6 @@ export function segmentTextInElement(htmlElement, htmlContent, granularity = 'wo
         return;
     }
 
-    // TODO: Support more locales, make granularity configurable.
-    const segmenter = new Intl.Segmenter('en-US', { granularity });
     const textNodes = [];
     const walker = document.createTreeWalker(htmlElement, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
@@ -70,17 +127,7 @@ export function segmentTextInElement(htmlElement, htmlContent, granularity = 'wo
 
     // Split every text node into segments using spans
     for (const textNode of textNodes) {
-        const fragment = document.createDocumentFragment();
-        const segments = segmenter.segment(textNode.data);
-        for (const segment of segments) {
-            // TODO: Apply a different class for different segment length/content?
-            // For now, just use a single class for all segments.
-            const span = document.createElement('span');
-            span.innerText = segment.segment;
-            span.className = 'text_segment';
-            fragment.appendChild(span);
-        }
-        textNode.replaceWith(fragment);
+        textNode.replaceWith(createTextSegments(textNode.data, granularity));
     }
 }
 
@@ -92,5 +139,19 @@ export function segmentTextInElement(htmlElement, htmlContent, granularity = 'wo
 export function applyStreamFadeIn(messageTextElement, htmlContent) {
     const targetElement = /** @type {HTMLElement} */ (messageTextElement.cloneNode());
     segmentTextInElement(targetElement, htmlContent);
-    morphdom(messageTextElement, targetElement);
+    morphdom(messageTextElement, targetElement, {
+        onBeforeElUpdated: (fromElement, toElement) => {
+            // Most paragraphs are unchanged while the last one grows. Avoid
+            // visiting every existing word span in those completed paragraphs.
+            // Form controls also have mutable properties that isEqualNode does
+            // not compare. Keyed descendants must be visited so morphdom removes
+            // their IDs from its unmatched-node index before adding other nodes.
+            if (fromElement.isEqualNode(toElement)
+                && !fromElement.matches('input, textarea, select, option')
+                && !fromElement.querySelector('input, textarea, select, option, [id]')) {
+                return false;
+            }
+            return true;
+        },
+    });
 }
