@@ -456,114 +456,140 @@ export async function getChatInfo(pathToFile, additionalData = {}, withMetadata 
  * @param {ChatMatchFunction|ChatTextMatcher|null} matcher Optional message matcher
  * @returns {Promise<ChatInfo|null>} Summary fields, or null if the file disappeared
  */
-function readChatInfo(pathToFile, stats, withMetadata, matcher) {
+async function readChatInfo(pathToFile, stats, withMetadata, matcher) {
     const incrementalMatcher = typeof matcher === 'object' && typeof matcher?.test === 'function' ? matcher : null;
     const hasMatcher = typeof matcher === 'function' || !!incrementalMatcher;
     /** @type {ChatInfo} */
     const chatData = {};
 
-    return new Promise((res, rej) => {
-        const fileStream = fs.createReadStream(pathToFile);
-        let finished = false;
-        /**
-         * @param {ChatInfo|null} value Scan result
-         * @param {Error|null} error Read error
-         */
-        const finish = (value, error = null) => {
-            if (finished) return;
-            finished = true;
-            // Keep the read slot until the descriptor is actually closed.
-            // readline's close event can precede the stream's asynchronous close.
-            const settle = () => error ? rej(error) : res(value);
-            if (fileStream.closed) settle();
-            else {
-                fileStream.once('close', settle);
-                fileStream.destroy();
+    const fileStream = fs.createReadStream(pathToFile);
+    const closed = new Promise(resolve => fileStream.once('close', resolve));
+    /** @type {Buffer[]} */
+    let lineParts = [];
+    let lineBytes = 0;
+    /** @type {Buffer[]|null} */
+    let lastLineParts = null;
+    /** @type {Buffer} */
+    let lastLineBuffer;
+    let lastLineStart = 0;
+    let lastLineEnd = 0;
+    let lastLineBytes = 0;
+    let itemCounter = 0;
+    let hasAnyMatch = false;
+    let matchBuffer = [];
+    let skipLineFeed = false;
+
+    /**
+     * Decode only lines needed for metadata, a pending search or the final
+     * preview. Concatenating buffers once also handles UTF-8 split across reads
+     * without repeatedly copying an exceptionally long JSONL message.
+     * @param {Buffer[]} parts Segments of one line
+     * @param {number} length Total byte length
+     * @returns {string} Decoded line
+     */
+    const decodeLine = (parts, length) => parts.length === 1
+        ? parts[0].toString('utf8')
+        : Buffer.concat(parts, length).toString('utf8');
+
+    const decodeLastLine = () => lastLineParts
+        ? decodeLine(lastLineParts, lastLineBytes)
+        : lastLineBuffer.toString('utf8', lastLineStart, lastLineEnd);
+
+    /**
+     * Keep complete lines as offsets into the read buffer. Most messages fit
+     * within one chunk, so they need neither a Buffer view nor an array per line.
+     * @param {Buffer} chunk Current read buffer
+     * @param {number} start Beginning of the final segment
+     * @param {number} end End of the final segment
+     */
+    const finishLine = (chunk, start, end) => {
+        lastLineBytes = lineBytes + end - start;
+        lastLineBuffer = chunk;
+        lastLineStart = start;
+        lastLineEnd = end;
+        if (lineParts.length) {
+            if (end > start) lineParts.push(chunk.subarray(start, end));
+            lastLineParts = lineParts;
+            lineParts = [];
+        } else {
+            lastLineParts = null;
+        }
+        lineBytes = 0;
+        const needsMetadata = withMetadata && itemCounter === 0;
+        const needsMatch = hasMatcher && !hasAnyMatch && itemCounter > 0;
+        if (needsMetadata || needsMatch) {
+            const jsonData = tryParse(decodeLastLine());
+            if (needsMetadata && jsonData && _.isObjectLike(jsonData.chat_metadata)) {
+                chatData.chat_metadata = jsonData.chat_metadata;
             }
-            rl.close();
-        };
-
-        // The file can still disappear between the stat above and the stream opening
-        fileStream.on('error', (/** @type {NodeJS.ErrnoException} */ error) => {
-            if (error.code === 'ENOENT') {
-                chatInfoCache.delete(pathToFile);
-                finish(null);
-                return;
-            }
-            finish(null, error);
-        });
-
-        const rl = readline.createInterface({
-            input: fileStream,
-            crlfDelay: Infinity,
-        });
-
-        // readline re-emits input stream errors; without a listener the emit throws
-        rl.on('error', (error) => {
-            if (error.code === 'ENOENT') {
-                finish(null);
-                return;
-            }
-            finish(null, error);
-        });
-
-        let lastLine;
-        let itemCounter = 0;
-        let hasAnyMatch = false;
-        let matchBuffer = [];
-        rl.on('line', (line) => {
-            if (withMetadata && itemCounter === 0) {
-                const jsonData = tryParse(line);
-                if (jsonData && _.isObjectLike(jsonData.chat_metadata)) {
-                    chatData.chat_metadata = jsonData.chat_metadata;
+            if (needsMatch && jsonData) {
+                if (incrementalMatcher) {
+                    hasAnyMatch = incrementalMatcher.test(jsonData.mes || '');
+                } else if (typeof matcher === 'function') {
+                    matchBuffer.push(jsonData.mes || '');
+                    hasAnyMatch = matcher(matchBuffer);
                 }
+                if (hasAnyMatch) matchBuffer = [];
             }
-            // Skip matching if any match was already found
-            if (hasMatcher && !hasAnyMatch && itemCounter > 0) {
-                const jsonData = tryParse(line);
-                if (jsonData) {
-                    if (incrementalMatcher) {
-                        hasAnyMatch = incrementalMatcher.test(jsonData.mes || '');
-                    } else if (typeof matcher === 'function') {
-                        matchBuffer.push(jsonData.mes || '');
-                        hasAnyMatch = matcher(matchBuffer);
-                    }
-                    if (hasAnyMatch) {
-                        matchBuffer = [];
-                    }
-                }
-            }
-            itemCounter++;
-            lastLine = line;
-        });
-        rl.on('close', () => {
-            if (finished) return;
-            if (lastLine) {
-                const jsonData = tryParse(lastLine);
-                if (jsonData && (jsonData.name || jsonData.character_name || jsonData.chat_metadata)) {
-                    chatData.chat_items = (itemCounter - 1);
-                    chatData.mes = jsonData.mes || '[The message is empty]';
-                    chatData.last_mes = jsonData.send_date || new Date(Math.round(stats.mtimeMs)).toISOString();
-                    chatData.match = hasMatcher ? hasAnyMatch : true;
+        }
+        itemCounter++;
+    };
 
-                    finish(chatData);
-                } else {
-                    // The last line is unparseable or lacks known fields (e.g. a truncated write or an external edit).
-                    // Resolve a degraded preview from the stat data instead of hiding an otherwise intact chat
-                    // from the chat list, search and recents.
-                    console.warn('Found an invalid or corrupted last line in a chat file:', pathToFile);
-                    // Exclude both the metadata line and the unreadable trailing line.
-                    chatData.chat_items = Math.max(itemCounter - 2, 0);
-                    chatData.mes = '[The message is empty]';
-                    chatData.match = hasMatcher ? hasAnyMatch : true;
-                    finish(chatData);
+    try {
+        for await (const chunk of fileStream) {
+            let start = skipLineFeed && chunk[0] === 10 ? 1 : 0;
+            skipLineFeed = false;
+            let lineFeed = chunk.indexOf(10, start);
+            let carriageReturn = chunk.indexOf(13, start);
+
+            while (lineFeed !== -1 || carriageReturn !== -1) {
+                const end = lineFeed === -1 ? carriageReturn : carriageReturn === -1 ? lineFeed : Math.min(lineFeed, carriageReturn);
+                finishLine(chunk, start, end);
+                start = end + 1;
+                if (end === carriageReturn) {
+                    // readline treats CR, LF and CRLF as one line ending, even
+                    // when CRLF straddles two chunks (crlfDelay: Infinity).
+                    skipLineFeed = start === chunk.length;
+                    if (chunk[start] === 10) start++;
+                    carriageReturn = chunk.indexOf(13, start);
                 }
+                lineFeed = chunk.indexOf(10, start);
+            }
+            if (start < chunk.length) {
+                lineParts.push(chunk.subarray(start));
+                lineBytes += chunk.length - start;
+            }
+        }
+        if (lineBytes > 0) finishLine(Buffer.alloc(0), 0, 0);
+
+        if (lastLineBytes > 0) {
+            const jsonData = tryParse(decodeLastLine());
+            if (jsonData && (jsonData.name || jsonData.character_name || jsonData.chat_metadata)) {
+                chatData.chat_items = itemCounter - 1;
+                chatData.mes = jsonData.mes || '[The message is empty]';
+                chatData.last_mes = jsonData.send_date || new Date(Math.round(stats.mtimeMs)).toISOString();
+                chatData.match = hasMatcher ? hasAnyMatch : true;
             } else {
-                // The file was truncated after the stat reported a non-zero size; treat it like an empty chat
-                finish(chatData);
+                // Preserve the degraded preview for an unreadable final line.
+                console.warn('Found an invalid or corrupted last line in a chat file:', pathToFile);
+                chatData.chat_items = Math.max(itemCounter - 2, 0);
+                chatData.mes = '[The message is empty]';
+                chatData.match = hasMatcher ? hasAnyMatch : true;
             }
-        });
-    });
+        }
+        return chatData;
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            chatInfoCache.delete(pathToFile);
+            return null;
+        }
+        throw error;
+    } finally {
+        // Stream iteration can finish before its descriptor closes. Keep the
+        // cache's read slot until close, including errors and disappearing files.
+        fileStream.destroy();
+        await closed;
+    }
 }
 
 export const router = express.Router();
@@ -1093,9 +1119,13 @@ router.post('/search', validateAvatarUrlMiddleware, async function (request, res
             // The client cancels obsolete searches while typing or switching
             // chats. Stop after the current file instead of scanning the rest.
             if (response.destroyed) return;
-            const matcher = query ? createChatSearchMatcher(fragments) : null;
+            // Filename and content matches are independent. If every fragment
+            // is already in the name, no message search is needed and an intact
+            // cached summary can satisfy the request without opening the file.
+            const fileNameMatch = hasTextMatch([path.parse(chatFile).name]);
+            const matcher = query && !fileNameMatch ? createChatSearchMatcher(fragments) : null;
             const chatInfo = await getChatInfo(chatFile, {}, false, matcher);
-            const hasMatch = chatInfo.match || hasTextMatch([chatInfo.file_id ?? '']);
+            const hasMatch = chatInfo.match || fileNameMatch;
 
             // Skip corrupted or invalid chat files
             if (!chatInfo.file_name) {

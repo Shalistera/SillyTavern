@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs/promises';
+import syncFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import express from 'express';
 
 process.env.SILLYTAVERN_BACKUPS_CHAT_ENABLED = 'false';
 process.env.SILLYTAVERN_BACKUPS_CHAT_MAXTOTALBACKUPS = '-1';
@@ -121,4 +123,47 @@ test('a disconnected search stops scanning after the current file', async (t) =>
     const handler = router.stack.find(layer => layer.route?.path === '/search').route.stack.at(-1).handle;
     await handler({ body: { query: 'alpha', avatar_url: 'Character.png' }, user: { directories: { chats: root } } }, response);
     assert.equal(inspectedFiles, 1);
+});
+
+test('HTTP filename searches reuse summaries, invalidate edits and keep content matching independent', async (t) => {
+    const root = await directory(t);
+    const character = path.join(root, 'Character');
+    await fs.mkdir(character);
+    const file = path.join(character, 'alpha beta.jsonl');
+    await fs.writeFile(file, jsonl(['original preview']));
+    const app = express();
+    app.use(express.json());
+    app.use((request, response, next) => {
+        request.user = /** @type {any} */ ({ directories: { chats: root } });
+        next();
+    });
+    app.use('/api/chats', router);
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise(resolve => server.once('listening', resolve));
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const search = async query => {
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/chats/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, avatar_url: 'Character.png' }),
+        });
+        assert.equal(response.status, 200);
+        return response.json();
+    };
+    const open = syncFs.createReadStream;
+    let reads = 0;
+    t.mock.method(syncFs, 'createReadStream', (...args) => { reads++; return open(...args); });
+    assert.equal((await search(''))[0].preview_message, 'original preview');
+    assert.equal(reads, 1);
+    assert.equal((await search('ALPHA beta'))[0].preview_message, 'original preview');
+    assert.equal(reads, 1, 'A complete filename match should reuse the summary without content I/O');
+    await fs.writeFile(file, jsonl(['edited preview']));
+    assert.equal((await search('ALPHA beta'))[0].preview_message, 'edited preview');
+    assert.equal(reads, 2);
+    assert.deepEqual(await search('alpha edited'), [], 'Filename and message fragments remain independent');
+    assert.equal(reads, 3);
+    assert.equal((await search('edited preview'))[0].file_name, 'alpha beta');
+    assert.equal(reads, 4, 'Content queries must inspect messages even when a summary is cached');
 });
