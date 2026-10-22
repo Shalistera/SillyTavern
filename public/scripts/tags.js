@@ -358,6 +358,26 @@ let tag_map = {};
 let expanded_tags_cache = [];
 
 /**
+ * Creates a predicate for entities hidden inside unselected closed folders.
+ * Index folder IDs once, then check each entity's tags instead of scanning all folders.
+ * @param {object[]} entities Available entities, including folder tags
+ * @param {string[]} selectedTags Currently selected tag IDs
+ * @returns {(entity: object) => boolean} Whether the entity belongs to a closed folder
+ */
+function createClosedFolderFilter(entities, selectedTags) {
+    const closedFolderIds = new Set(entities
+        .filter(entity => entity.type === 'tag' && TAG_FOLDER_TYPES[entity.item.folder_type] === TAG_FOLDER_TYPES.CLOSED && !selectedTags.includes(entity.id))
+        .map(entity => entity.id));
+
+    return entity => {
+        if (closedFolderIds.size === 0) return false;
+        const lookupValue = entity.type === 'character' ? entity.item.avatar : String(entity.id);
+        const entityTags = tag_map[lookupValue];
+        return Array.isArray(entityTags) && entityTags.some(tagId => closedFolderIds.has(tagId));
+    };
+}
+
+/**
  * Applies the basic filter for the current state of the tags and their selection on an entity list.
  * @param {Array<Object>} entities List of entities for display, consisting of tags, characters and groups.
  * @param {Object} param1 Optional parameters, explained below.
@@ -382,11 +402,11 @@ function filterByTagState(entities, { globalDisplayFilters = false, subForEntity
 
     if (globalDisplayFilters) {
         // Prepare some data for caching and performance
-        const closedFolders = entities.filter(x => x.type === 'tag' && TAG_FOLDER_TYPES[x.item.folder_type] === TAG_FOLDER_TYPES.CLOSED);
+        const isHiddenByClosedFolder = filterHidden ? createClosedFolderFilter(entities, filterData.selected) : null;
 
         entities = entities.filter(entity => {
             // Hide entities that are in a closed folder, unless that one is opened
-            if (filterHidden && entity.type !== 'tag' && closedFolders.some(f => entitiesFilter.isElementTagged(entity, f.id) && !filterData.selected.includes(f.id))) {
+            if (entity.type !== 'tag' && isHiddenByClosedFolder?.(entity)) {
                 return false;
             }
 
@@ -419,7 +439,8 @@ function filterByTagState(entities, { globalDisplayFilters = false, subForEntity
 function filterTagSubEntities(tag, entities, { filterHidden = true } = {}) {
     const filterData = structuredClone(entitiesFilter.getFilterData(FILTER_TYPES.TAG));
 
-    const closedFolders = entities.filter(x => x.type === 'tag' && TAG_FOLDER_TYPES[x.item.folder_type] === TAG_FOLDER_TYPES.CLOSED);
+    const isHiddenByClosedFolder = filterHidden && TAG_FOLDER_TYPES[tag.folder_type] !== TAG_FOLDER_TYPES.CLOSED
+        ? createClosedFolderFilter(entities, filterData.selected) : null;
 
     entities = entities.filter(sub => {
         // Filter out all tags and and all who isn't tagged for this item
@@ -428,7 +449,7 @@ function filterTagSubEntities(tag, entities, { filterHidden = true } = {}) {
         }
 
         // Hide entities that are in a closed folder, unless the closed folder is opened or we display a closed folder
-        if (filterHidden && sub.type !== 'tag' && TAG_FOLDER_TYPES[tag.folder_type] !== TAG_FOLDER_TYPES.CLOSED && closedFolders.some(f => entitiesFilter.isElementTagged(sub, f.id) && !filterData.selected.includes(f.id))) {
+        if (isHiddenByClosedFolder?.(sub)) {
             return false;
         }
 
