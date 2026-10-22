@@ -1,4 +1,5 @@
 import { localforage } from '../lib.js';
+import { ChatTokenCache } from './util/chat-token-cache.js';
 import { characters, event_types, eventSource, main_api, nai_settings, online_status, this_chid } from '../script.js';
 import { power_user, registerDebugFunction } from './power-user.js';
 import { chat_completion_sources, model_list, oai_settings } from './openai.js';
@@ -156,7 +157,7 @@ const TOKENIZER_URLS = {
 const textEncoder = new TextEncoder();
 const objectStore = localforage.createInstance({ name: 'SillyTavern_ChatCompletions' });
 
-let tokenCache = {};
+const tokenCache = new ChatTokenCache(objectStore, { onError: (...args) => console.warn('Chat Completions:', ...args) });
 
 /**
  * Guesstimates the token count for a string.
@@ -168,30 +169,13 @@ export function guesstimate(str) {
     return Math.ceil(byteLength / BYTES_PER_TOKEN);
 }
 
-async function loadTokenCache() {
-    try {
-        console.debug('Chat Completions: loading token cache');
-        tokenCache = await objectStore.getItem('tokenCache') || {};
-    } catch (e) {
-        console.log('Chat Completions: unable to load token cache, using default value', e);
-        tokenCache = {};
-    }
-}
-
 export async function saveTokenCache() {
-    try {
-        console.debug('Chat Completions: saving token cache');
-        await objectStore.setItem('tokenCache', tokenCache);
-    } catch (e) {
-        console.log('Chat Completions: unable to save token cache', e);
-    }
+    await tokenCache.save();
 }
 
 async function resetTokenCache() {
     try {
-        console.debug('Chat Completions: resetting token cache');
-        Object.keys(tokenCache).forEach(key => delete tokenCache[key]);
-        await objectStore.removeItem('tokenCache');
+        await tokenCache.reset();
         toastr.success('Token cache cleared. Please reload the chat to re-tokenize it.');
     } catch (e) {
         console.log('Chat Completions: unable to reset token cache', e);
@@ -407,9 +391,10 @@ function callTokenizer(type, str) {
  * Calls the underlying tokenizer model to the token count for a string.
  * @param {number} type Tokenizer type.
  * @param {string} str String to tokenize.
+ * @param {object} [remoteParams] Connection settings captured before an asynchronous cache read.
  * @returns {Promise<number>} Token count.
  */
-function callTokenizerAsync(type, str) {
+function callTokenizerAsync(type, str, remoteParams) {
     return new Promise(resolve => {
         if (type === tokenizers.NONE) {
             return resolve(guesstimate(str));
@@ -419,9 +404,9 @@ function callTokenizerAsync(type, str) {
             case tokenizers.API_CURRENT:
                 return callTokenizerAsync(currentRemoteTokenizerAPI(), str).then(resolve);
             case tokenizers.API_KOBOLD:
-                return countTokensFromKoboldAPI(str, resolve);
+                return countTokensFromKoboldAPI(str, resolve, remoteParams);
             case tokenizers.API_TEXTGENERATIONWEBUI:
-                return countTokensFromTextgenAPI(str, resolve);
+                return countTokensFromTextgenAPI(str, resolve, remoteParams);
             default: {
                 const endpointUrl = TOKENIZER_URLS[type]?.count;
                 if (!endpointUrl) {
@@ -470,23 +455,33 @@ export async function getTokenCountAsync(str, padding = undefined) {
         padding = 0;
     }
 
-    const cacheObject = getTokenCacheObject();
-    const hash = getStringHash(str);
-    const cacheKey = `${tokenizerType}-${hash}${modelHash}+${padding}`;
+    // Capture mutable connection settings before waiting for the chat's disk cache.
+    const requestType = tokenizerType === tokenizers.API_CURRENT ? currentRemoteTokenizerAPI() : tokenizerType;
+    const remoteParams = requestType === tokenizers.API_KOBOLD ? { text: str, url: kai_settings.api_server }
+        : requestType === tokenizers.API_TEXTGENERATIONWEBUI ? getTextgenAPITokenizationParams(str) : undefined;
+    const cacheState = getTokenCacheState();
+    try {
+        await cacheState.ready;
+        const cacheObject = cacheState.values;
+        const hash = getStringHash(str);
+        const cacheKey = `${tokenizerType}-${hash}${modelHash}+${padding}`;
 
-    if (typeof cacheObject[cacheKey] === 'number') {
-        return cacheObject[cacheKey];
+        if (typeof cacheObject[cacheKey] === 'number') {
+            return cacheObject[cacheKey];
+        }
+
+        const result = (await callTokenizerAsync(requestType, str, remoteParams)) + padding;
+
+        if (isNaN(result)) {
+            console.warn('Token count calculation returned NaN');
+            return 0;
+        }
+
+        tokenCache.set(cacheState, cacheKey, result);
+        return result;
+    } finally {
+        tokenCache.release(cacheState);
     }
-
-    const result = (await callTokenizerAsync(tokenizerType, str)) + padding;
-
-    if (isNaN(result)) {
-        console.warn('Token count calculation returned NaN');
-        return 0;
-    }
-
-    cacheObject[cacheKey] = result;
-    return result;
 }
 
 /**
@@ -526,23 +521,28 @@ export function getTokenCount(str, padding = undefined) {
         padding = 0;
     }
 
-    const cacheObject = getTokenCacheObject();
-    const hash = getStringHash(str);
-    const cacheKey = `${tokenizerType}-${hash}${modelHash}+${padding}`;
+    const cacheState = getTokenCacheState();
+    try {
+        const cacheObject = cacheState.values;
+        const hash = getStringHash(str);
+        const cacheKey = `${tokenizerType}-${hash}${modelHash}+${padding}`;
 
-    if (typeof cacheObject[cacheKey] === 'number') {
-        return cacheObject[cacheKey];
+        if (typeof cacheObject[cacheKey] === 'number') {
+            return cacheObject[cacheKey];
+        }
+
+        const result = callTokenizer(tokenizerType, str) + padding;
+
+        if (isNaN(result)) {
+            console.warn('Token count calculation returned NaN');
+            return 0;
+        }
+
+        tokenCache.set(cacheState, cacheKey, result);
+        return result;
+    } finally {
+        tokenCache.release(cacheState);
     }
-
-    const result = callTokenizer(tokenizerType, str) + padding;
-
-    if (isNaN(result)) {
-        console.warn('Token count calculation returned NaN');
-        return 0;
-    }
-
-    cacheObject[cacheKey] = result;
-    return result;
 }
 
 /**
@@ -794,47 +794,51 @@ export function getTokenizerModel() {
  * @deprecated Use countTokensOpenAIAsync instead.
  */
 export function countTokensOpenAI(messages, full = false) {
-    const tokenizerEndpoint = `/api/tokenizers/openai/count?model=${getTokenizerModel()}`;
-    const cacheObject = getTokenCacheObject();
+    const model = getTokenizerModel();
+    const tokenizerEndpoint = `/api/tokenizers/openai/count?model=${model}`;
+    const cacheState = getTokenCacheState();
+    try {
+        const cacheObject = cacheState.values;
 
-    if (!Array.isArray(messages)) {
-        messages = [messages];
-    }
-
-    let token_count = 0;
-
-    for (const message of messages) {
-        const model = getTokenizerModel();
-
-        if (model === 'claude') {
-            full = true;
+        if (!Array.isArray(messages)) {
+            messages = [messages];
         }
 
-        const hash = getStringHash(JSON.stringify(message));
-        const cacheKey = `${model}-${hash}`;
-        const cachedCount = cacheObject[cacheKey];
+        let token_count = 0;
 
-        if (typeof cachedCount === 'number') {
-            token_count += cachedCount;
-        } else {
-            jQuery.ajax({
-                async: false,
-                type: 'POST', //
-                url: tokenizerEndpoint,
-                data: JSON.stringify([message]),
-                dataType: 'json',
-                contentType: 'application/json',
-                success: function (data) {
-                    token_count += Number(data.token_count);
-                    cacheObject[cacheKey] = Number(data.token_count);
-                },
-            });
+        for (const message of messages) {
+            if (model === 'claude') {
+                full = true;
+            }
+
+            const hash = getStringHash(JSON.stringify(message));
+            const cacheKey = `${model}-${hash}`;
+            const cachedCount = cacheObject[cacheKey];
+
+            if (typeof cachedCount === 'number') {
+                token_count += cachedCount;
+            } else {
+                jQuery.ajax({
+                    async: false,
+                    type: 'POST', //
+                    url: tokenizerEndpoint,
+                    data: JSON.stringify([message]),
+                    dataType: 'json',
+                    contentType: 'application/json',
+                    success: function (data) {
+                        token_count += Number(data.token_count);
+                        tokenCache.set(cacheState, cacheKey, Number(data.token_count));
+                    },
+                });
+            }
         }
+
+        if (!full) token_count -= 2;
+
+        return token_count;
+    } finally {
+        tokenCache.release(cacheState);
     }
-
-    if (!full) token_count -= 2;
-
-    return token_count;
 }
 
 /**
@@ -844,53 +848,58 @@ export function countTokensOpenAI(messages, full = false) {
  * @returns {Promise<number>} Token count.
  */
 export async function countTokensOpenAIAsync(messages, full = false) {
-    const tokenizerEndpoint = `/api/tokenizers/openai/count?model=${getTokenizerModel()}`;
-    const cacheObject = getTokenCacheObject();
+    const model = getTokenizerModel();
+    const tokenizerEndpoint = `/api/tokenizers/openai/count?model=${model}`;
+    const cacheState = getTokenCacheState();
+    try {
+        await cacheState.ready;
+        const cacheObject = cacheState.values;
 
-    if (!Array.isArray(messages)) {
-        messages = [messages];
-    }
-
-    let token_count = 0;
-
-    for (const message of messages) {
-        const model = getTokenizerModel();
-
-        if (model === 'claude') {
-            full = true;
+        if (!Array.isArray(messages)) {
+            messages = [messages];
         }
 
-        const hash = getStringHash(JSON.stringify(message));
-        const cacheKey = `${model}-${hash}`;
-        const cachedCount = cacheObject[cacheKey];
+        let token_count = 0;
 
-        if (typeof cachedCount === 'number') {
-            token_count += cachedCount;
-        } else {
-            const data = await jQuery.ajax({
-                async: true,
-                type: 'POST', //
-                url: tokenizerEndpoint,
-                data: JSON.stringify([message]),
-                dataType: 'json',
-                contentType: 'application/json',
-            });
+        for (const message of messages) {
+            if (model === 'claude') {
+                full = true;
+            }
 
-            token_count += Number(data.token_count);
-            cacheObject[cacheKey] = Number(data.token_count);
+            const hash = getStringHash(JSON.stringify(message));
+            const cacheKey = `${model}-${hash}`;
+            const cachedCount = cacheObject[cacheKey];
+
+            if (typeof cachedCount === 'number') {
+                token_count += cachedCount;
+            } else {
+                const data = await jQuery.ajax({
+                    async: true,
+                    type: 'POST', //
+                    url: tokenizerEndpoint,
+                    data: JSON.stringify([message]),
+                    dataType: 'json',
+                    contentType: 'application/json',
+                });
+
+                token_count += Number(data.token_count);
+                tokenCache.set(cacheState, cacheKey, Number(data.token_count));
+            }
         }
+
+        if (!full) token_count -= 2;
+
+        return token_count;
+    } finally {
+        tokenCache.release(cacheState);
     }
-
-    if (!full) token_count -= 2;
-
-    return token_count;
 }
 
 /**
- * Gets the token cache object for the current chat.
- * @returns {Object} Token cache object for the current chat.
+ * Acquires the current chat cache, keeping it resident until tokenCache.release().
+ * @returns {Object} Leased cache state with values and an asynchronous ready promise.
  */
-function getTokenCacheObject() {
+function getTokenCacheState() {
     let chatId = 'undefined';
 
     try {
@@ -903,11 +912,7 @@ function getTokenCacheObject() {
         console.log('No character / group selected. Using default cache item');
     }
 
-    if (typeof tokenCache[chatId] !== 'object') {
-        tokenCache[chatId] = {};
-    }
-
-    return tokenCache[String(chatId)];
+    return tokenCache.acquire(chatId);
 }
 
 /**
@@ -950,9 +955,10 @@ function countTokensFromServer(endpoint, str, resolve) {
  * Count tokens using the AI provider's API.
  * @param {string} str String to tokenize.
  * @param {function} [resolve] Promise resolve function.
+ * @param {object} [params] Captured remote request payload.
  * @returns {number} Token count.
  */
-function countTokensFromKoboldAPI(str, resolve) {
+function countTokensFromKoboldAPI(str, resolve, params = { text: str, url: kai_settings.api_server }) {
     const isAsync = typeof resolve === 'function';
     let tokenCount = 0;
 
@@ -960,10 +966,7 @@ function countTokensFromKoboldAPI(str, resolve) {
         async: isAsync,
         type: 'POST',
         url: TOKENIZER_URLS[tokenizers.API_KOBOLD].count,
-        data: JSON.stringify({
-            text: str,
-            url: kai_settings.api_server,
-        }),
+        data: JSON.stringify(params),
         dataType: 'json',
         contentType: 'application/json',
         success: function (data) {
@@ -997,9 +1000,10 @@ function getTextgenAPITokenizationParams(str) {
  * Count tokens using the AI provider's API.
  * @param {string} str String to tokenize.
  * @param {function} [resolve] Promise resolve function.
+ * @param {object} [params] Captured remote request payload.
  * @returns {number} Token count.
  */
-function countTokensFromTextgenAPI(str, resolve) {
+function countTokensFromTextgenAPI(str, resolve, params = getTextgenAPITokenizationParams(str)) {
     const isAsync = typeof resolve === 'function';
     let tokenCount = 0;
 
@@ -1007,7 +1011,7 @@ function countTokensFromTextgenAPI(str, resolve) {
         async: isAsync,
         type: 'POST',
         url: TOKENIZER_URLS[tokenizers.API_TEXTGENERATIONWEBUI].count,
-        data: JSON.stringify(getTextgenAPITokenizationParams(str)),
+        data: JSON.stringify(params),
         dataType: 'json',
         contentType: 'application/json',
         success: function (data) {
@@ -1237,7 +1241,22 @@ export async function initTokenizers() {
             sessionStorage.removeItem(TOKENIZER_WARNING_KEY);
         }
     });
-    await loadTokenCache();
+    eventSource.on(event_types.CHAT_CHANGED, async () => {
+        const state = getTokenCacheState();
+        try {
+            await state.ready;
+        } finally {
+            tokenCache.release(state);
+        }
+    });
+    for (const event of [event_types.CHAT_DELETED, event_types.GROUP_CHAT_DELETED]) {
+        eventSource.on(event, chatId => tokenCache.remove(chatId).catch(error => console.warn('Unable to delete token cache', error)));
+    }
+    // Old cached counts can be recomputed. Do not parse all historical chats
+    // merely to migrate a performance cache; remove it after startup is idle.
+    const removeLegacy = () => tokenCache.removeLegacyCache().catch(error => console.warn('Unable to remove legacy token cache', error));
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(removeLegacy, { timeout: 2000 });
+    else setTimeout(removeLegacy, 2000);
     registerDebugFunction('resetTokenCache', 'Reset token cache', 'Purges the calculated token counts. Use this if you want to force a full re-tokenization of all chats or suspect the token counts are wrong.', resetTokenCache);
 }
 
