@@ -188,6 +188,10 @@ async function readCharacterData(inputFile, inputFormat = 'png') {
             const cache = await diskCache.instance();
             const cachedData = await cache.getItem(cacheKey);
             if (cachedData) {
+                // Populate the same bounded memory cache used by freshly parsed
+                // cards, so subsequent list/get requests do not reread the disk
+                // cache after every server restart. Android retains disk-only hits.
+                !isAndroid && memoryCache.set(cacheKey, cachedData);
                 return cachedData;
             }
         } catch (error) {
