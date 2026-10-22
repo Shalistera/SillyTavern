@@ -122,6 +122,12 @@ class MacroEngine {
 
         const preProcessed = this.#runPreProcessors(input, safeEnv);
 
+        // Processors can introduce macros or transform plain text. Run both
+        // stages even when the processed text needs no lexer/parser traversal.
+        if (typeof preProcessed === 'string' && preProcessed.length > 0 && !preProcessed.includes('{{')) {
+            return this.#runPostProcessors(preProcessed, safeEnv);
+        }
+
         const { cst, lexingErrors, parserErrors } = MacroParser.parseDocument(preProcessed);
 
         // For now, we log and still try to process what we can.

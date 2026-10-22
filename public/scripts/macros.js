@@ -635,6 +635,15 @@ export function evaluateMacros(content, env, postProcessFn) {
         { regex: /{{input}}/gi, replace: () => String($('#send_textarea').val()) },
     ];
 
+    // Plain regex replacements and ordinary chat text have no macros to run.
+    // Keep the environment reads above, registered values, and chat hash setup
+    // observable to callers, without compiling unused patterns or hashing text.
+    if (typeof content === 'string' && !content.includes('{{') && !/<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i.test(content)) {
+        getChatIdHash();
+        MacrosParser.populateEnv(env);
+        return content;
+    }
+
     /**
      * Built-ins running after the env variables
      * @type {Macro[]}
