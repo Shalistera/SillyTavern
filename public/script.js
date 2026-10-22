@@ -2692,7 +2692,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
 
     updateMessageItemizedPromptButton(mes, { messageId, messageElement });
 
-    messageElement.find('.avatar img').on('error', function () {
+    messageElement.find('.avatar img').off('error.messageAvatarFallback').on('error.messageAvatarFallback', function () {
         $(this).hide();
         $(this).parent().html('<div class="missing-avatar fa-solid fa-user-slash"></div>');
     });
