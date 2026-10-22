@@ -929,12 +929,16 @@ function countTokensFromServer(endpoint, str, resolve) {
         dataType: 'json',
         contentType: 'application/json',
         success: function (data) {
-            if (typeof data.count === 'number') {
+            if (typeof data?.count === 'number') {
                 tokenCount = data.count;
             } else {
                 tokenCount = apiFailureTokenCount(str);
             }
 
+            isAsync && resolve(tokenCount);
+        },
+        error: function () {
+            tokenCount = apiFailureTokenCount(str);
             isAsync && resolve(tokenCount);
         },
     });
@@ -963,12 +967,16 @@ function countTokensFromKoboldAPI(str, resolve) {
         dataType: 'json',
         contentType: 'application/json',
         success: function (data) {
-            if (typeof data.count === 'number') {
+            if (typeof data?.count === 'number') {
                 tokenCount = data.count;
             } else {
                 tokenCount = apiFailureTokenCount(str);
             }
 
+            isAsync && resolve(tokenCount);
+        },
+        error: function () {
+            tokenCount = apiFailureTokenCount(str);
             isAsync && resolve(tokenCount);
         },
     });
@@ -1003,12 +1011,16 @@ function countTokensFromTextgenAPI(str, resolve) {
         dataType: 'json',
         contentType: 'application/json',
         success: function (data) {
-            if (typeof data.count === 'number') {
+            if (typeof data?.count === 'number') {
                 tokenCount = data.count;
             } else {
                 tokenCount = apiFailureTokenCount(str);
             }
 
+            isAsync && resolve(tokenCount);
+        },
+        error: function () {
+            tokenCount = apiFailureTokenCount(str);
             isAsync && resolve(tokenCount);
         },
     });
