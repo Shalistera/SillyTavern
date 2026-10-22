@@ -159,6 +159,10 @@ class SentencePieceTokenizer {
      */
     #instance;
     /**
+     * @type {Promise<import('@agnai/sentencepiece-js').SentencePieceProcessor|null>|undefined} Shared pending initialization
+     */
+    #loading;
+    /**
      * @type {string} Path to the tokenizer model
      */
     #model;
@@ -186,10 +190,22 @@ class SentencePieceTokenizer {
             return this.#instance;
         }
 
+        if (!this.#loading) {
+            this.#loading = this.#load().finally(() => { this.#loading = undefined; });
+        }
+        return this.#loading;
+    }
+
+    /**
+     * Publishes the processor only after its model is ready for every caller.
+     * @returns {Promise<import('@agnai/sentencepiece-js').SentencePieceProcessor|null>} Ready processor or failure
+     */
+    async #load() {
         try {
             const pathToModel = await getPathToTokenizer(this.#model, this.#fallbackModel);
-            this.#instance = new SentencePieceProcessor();
-            await this.#instance.load(pathToModel);
+            const instance = new SentencePieceProcessor();
+            await instance.load(pathToModel);
+            this.#instance = instance;
             console.info('Instantiated the tokenizer for', path.parse(pathToModel).name);
             return this.#instance;
         } catch (error) {
@@ -207,6 +223,10 @@ class WebTokenizer {
      * @type {Tokenizer} Web tokenizer instance
      */
     #instance;
+    /**
+     * @type {Promise<Tokenizer|null>|undefined} Shared pending initialization
+     */
+    #loading;
     /**
      * @type {string} Path to the tokenizer model
      */
@@ -235,6 +255,17 @@ class WebTokenizer {
             return this.#instance;
         }
 
+        if (!this.#loading) {
+            this.#loading = this.#load().finally(() => { this.#loading = undefined; });
+        }
+        return this.#loading;
+    }
+
+    /**
+     * Reads and parses the model once for all concurrent callers.
+     * @returns {Promise<Tokenizer|null>} Ready tokenizer or failure
+     */
+    async #load() {
         try {
             const pathToModel = await getPathToTokenizer(this.#model, this.#fallbackModel);
             const fileBuffer = await fs.promises.readFile(pathToModel);
@@ -359,13 +390,11 @@ export function getWebTokenizer(model) {
 
 /**
  * Counts the token ids for the given text using the Sentencepiece tokenizer.
- * @param {SentencePieceTokenizer} tokenizer Sentencepiece tokenizer
+ * @param {import('@agnai/sentencepiece-js').SentencePieceProcessor|null|undefined} instance Ready Sentencepiece processor
  * @param {string} text Text to tokenize
- * @returns { Promise<{ids: number[], count: number}> } Tokenization result
+ * @returns {{ids: number[], count: number}} Tokenization result
  */
-async function countSentencepieceTokens(tokenizer, text) {
-    const instance = await tokenizer?.get();
-
+function countSentencepieceTokens(instance, text) {
     // Fallback to strlen estimation
     if (!instance) {
         return {
@@ -391,7 +420,8 @@ async function countSentencepieceTokens(tokenizer, text) {
  */
 async function countSentencepieceArrayTokens(tokenizer, array) {
     const jsonBody = array.flatMap(x => Object.values(x)).join('\n\n');
-    const result = await countSentencepieceTokens(tokenizer, jsonBody);
+    const instance = await tokenizer?.get();
+    const result = countSentencepieceTokens(instance, jsonBody);
     const num_tokens = result.count;
     return num_tokens;
 }
@@ -574,7 +604,7 @@ function createSentencepieceEncodingHandler(tokenizer) {
 
             const text = request.body.text || '';
             const instance = await tokenizer?.get();
-            const { ids, count } = await countSentencepieceTokens(tokenizer, text);
+            const { ids, count } = countSentencepieceTokens(instance, text);
             const chunks = instance?.encodePieces(text);
             return response.send({ ids, count, chunks });
         } catch (error) {
