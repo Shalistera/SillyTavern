@@ -53,11 +53,11 @@ test('span expansion matches ordered replacement for nested, duplicated and lite
         ['¨C0C1C', ['¨C', '<em>assembled token</em>']],
         ['¨C¨C0C', ['1C', '<em>assembled token</em>']],
         ['before ¨C0C middle ¨C1C after', ['<q>$&</q>', '<b>$$</b>']],
-        ['before ¨C0C middle ¨C1C after', ['<q>$`</q>', "<b>$'</b>"]],
+        ['before ¨C0C middle ¨C1C after', ['<q>$`</q>', '<b>$\'</b>']],
         ['¨C1C', ['<q>$&</q>', '<b>¨C0C</b>']],
         ['¨C0C ¨C1C', ['<q>$1 and $0 stay literal</q>', '<b>cost $5</b>']],
         ['¨C0C', Object.assign(['<q>¨C01C</q>'], { '01': '$$&' })],
-        ['¨C0C', Object.assign(['<q>¨C01C</q>'], { '01': "$$'" })],
+        ['¨C0C', Object.assign(['<q>¨C01C</q>'], { '01': '$$\'' })],
         ['¨C0C', Object.assign(['<q>¨C01C</q>'], { '01': '$$`' })],
     ];
     for (const [text, spans] of cases) {
@@ -81,6 +81,20 @@ test('extension dispatch may rewrite text and spans and invoke the parser reentr
         return text;
     };
     assert.deepEqual(run(optimizedUnhash, '¨C0C', [], replaceSpanTable), run(originalUnhash, '¨C0C', [], replaceSpanTable));
+});
+
+test('extension-provided iterators do not override numerically indexed spans', () => {
+    const dispatch = (event, text, _options, globals) => {
+        if (event.endsWith('.before')) {
+            globals.gHtmlSpans[Symbol.iterator] = function* () {
+                yield '<q>iterator value</q>';
+            };
+        }
+        return text;
+    };
+    const expected = run(originalUnhash, '¨C0C', ['<q>indexed value</q>'], dispatch);
+    assert.equal(expected.html, '<q>indexed value</q>');
+    assert.deepEqual(run(optimizedUnhash, '¨C0C', ['<q>indexed value</q>'], dispatch), expected);
 });
 
 test('cyclic references retain the previous nesting limit and diagnostic', () => {

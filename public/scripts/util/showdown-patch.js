@@ -39,8 +39,8 @@ export function addShowdownPatch(showdown) {
             }
         }
         if (canReplaceTogether) {
-            for (const span of spans) {
-                let replacement = span;
+            for (let index = 0; index < spans.length; index++) {
+                let replacement = spans[index];
                 let limit = 0;
                 while (/¨C(\d+)C/.test(replacement)) {
                     const nestedIndex = RegExp.$1;
