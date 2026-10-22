@@ -119,6 +119,12 @@ router.post('/all', (request, response) => {
 
     const files = fs.readdirSync(request.user.directories.groups).filter(x => path.extname(x) === '.json');
     const chats = fs.readdirSync(request.user.directories.groupChats).filter(x => path.extname(x) === '.jsonl');
+    // Match each group's references directly instead of scanning the entire
+    // chat directory again for every group. Keep the directory order for stats.
+    const chatsById = new Map(chats.map((file, index) => [path.parse(file).name, { file, index }]));
+    // A chat can belong to multiple groups. Share successful stats only within
+    // this request; the next list request must observe edits and deleted files.
+    const chatStats = new Map();
 
     files.forEach(function (file) {
         try {
@@ -132,13 +138,19 @@ router.post('/all', (request, response) => {
             let chat_size = 0;
             let date_last_chat = 0;
 
-            if (Array.isArray(group.chats) && Array.isArray(chats)) {
-                for (const chat of chats) {
-                    if (group.chats.includes(path.parse(chat).name)) {
-                        const chatStat = fs.statSync(path.join(request.user.directories.groupChats, chat));
-                        chat_size += chatStat.size;
-                        date_last_chat = Math.max(date_last_chat, chatStat.mtimeMs);
+            if (Array.isArray(group.chats)) {
+                const matchingChats = [...new Set(group.chats)]
+                    .map(id => chatsById.get(id))
+                    .filter(Boolean)
+                    .sort((a, b) => a.index - b.index);
+                for (const { file: chat } of matchingChats) {
+                    let chatStat = chatStats.get(chat);
+                    if (!chatStat) {
+                        chatStat = fs.statSync(path.join(request.user.directories.groupChats, chat));
+                        chatStats.set(chat, chatStat);
                     }
+                    chat_size += chatStat.size;
+                    date_last_chat = Math.max(date_last_chat, chatStat.mtimeMs);
                 }
             }
 
