@@ -3920,6 +3920,7 @@ class StreamingProcessor {
         const isContinue = this.type == 'continue';
         this.stoppingStrings = getStoppingStrings(isImpersonate, isContinue, main_api);
 
+        let pendingPreview = false;
         try {
             const configuredFps = normalizeStreamingFps(power_user.streaming_fps);
             const sw = new Stopwatch(getStreamingRenderInterval({ configuredFps, hidden: document.hidden }));
@@ -3944,9 +3945,14 @@ class StreamingProcessor {
                 this.reasoningHandler.updateReasoning(this.messageId, state?.reasoning);
                 this.images = state?.images ?? [];
                 this.reasoningSignature = state?.signature ?? null;
+                pendingPreview = true;
                 await eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text);
                 sw.interval = getStreamingRenderInterval({ configuredFps, hidden: document.hidden });
-                await sw.tick(async () => await this.onProgressStreaming(this.messageId, this.continueMessage + text));
+                await sw.tick(async () => {
+                    // A failing renderer must not be retried by the error cleanup below.
+                    pendingPreview = false;
+                    await this.onProgressStreaming(this.messageId, this.continueMessage + text);
+                });
             }
             const seconds = (timestamps[timestamps.length - 1] - timestamps[0]) / 1000;
             console.warn(`Stream stats: ${timestamps.length} tokens, ${seconds.toFixed(2)} seconds, rate: ${Number(timestamps.length / seconds).toFixed(2)} TPS`);
@@ -3954,6 +3960,14 @@ class StreamingProcessor {
             // in the case of a self-inflicted abort, we have already cleaned up
             if (!this.isFinished) {
                 console.error(err);
+                if (pendingPreview) {
+                    try {
+                        pendingPreview = false;
+                        await this.onProgressStreaming(this.messageId, this.continueMessage + this.result);
+                    } catch (previewError) {
+                        console.error('Failed to render the last received stream content:', previewError);
+                    }
+                }
                 this.onErrorStreaming();
             }
             return this.result;
@@ -5463,7 +5477,9 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             if (canPerformToolCalls && isStreamFinished && isStreamWithToolCalls) {
                 const lastMessage = chat[chat.length - 1];
                 const hasToolCalls = ToolManager.hasToolCalls(streamingProcessor.toolCalls);
-                const shouldDeleteMessage = type !== 'swipe' && ['', '...'].includes(lastMessage?.mes) && !lastMessage?.extra?.reasoning && ['', '...'].includes(streamingProcessor?.result);
+                // Hidden-tab previews can lag behind the reasoning collected from every chunk.
+                const hasReasoning = lastMessage?.extra?.reasoning || streamingProcessor.reasoningHandler.reasoning;
+                const shouldDeleteMessage = type !== 'swipe' && ['', '...'].includes(lastMessage?.mes) && !hasReasoning && ['', '...'].includes(streamingProcessor?.result);
                 hasToolCalls && shouldDeleteMessage && await deleteLastMessage();
                 if (hasToolCalls && !shouldDeleteMessage) {
                     await streamingProcessor.finalizeIntermediaryMessage(streamingProcessor.messageId, getMessage, { unlockUI: false });
