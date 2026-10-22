@@ -151,14 +151,14 @@ The [TauriTavern reference revision](https://github.com/Darkatse/TauriTavern/tre
 | Read token counts for one active chat, 500 historical chats × 1,000 counts | 39.7 ms | 0.8 ms |
 | Save one changed count in that fixture | 44.6 ms | 2.3 ms |
 | Background previews over 500 chunks / five simulated seconds | 125 | 20 |
-| Same background stream, processor and DOM execution time | 2,013–2,020 ms | 388–452 ms |
+| Same background stream, browser main-thread CPU time | 2,038–2,068 ms | 419–460 ms |
 | Animation-probe original bytes, twelve ~2 MiB PNG or WebP files | ~24 MiB | 2,400 bytes |
 | Static PNG generation original bytes, same fixture size | ~48 MiB | ~24 MiB |
 | Initialize six templates with 100 ms added response delay each | 686–733 ms | 147 ms |
 
 Token-cache timings are medians of seven alternating runs in real Chromium IndexedDB with warm storage and OS caches. The old serialized fixture is 8.34 MB; the active chat is 13.8 kB. The comparison measures cache reads/writes, excluding fixture preparation and the rest of application startup. Cache tests cover pending-load merges, switching chats or connections during a count, dirty writes during eviction, deletion/reset, storage failure, and bounded residency. The one-time legacy-cache removal trades previously calculated counts for avoiding a full historical-cache migration.
 
-Streaming tests use the actual processor and Markdown/DOM path with a deterministic chunk clock and simulated tab visibility. The timing comparison runs baseline/current/current/baseline in a separate idle window; foreground preview counts remain 125 and execution times are similar. Every chunk, token event, final message, reasoning field, tool call, and final flush is checked; these numbers do not measure provider throughput. Additional regressions exercise real generation and tool invocation for short reasoning-only streams, plus connection and renderer failures without repeated completion events. A 200,000-message neutral-chat restore also verifies the shared array's identity and every message's position.
+Streaming tests use the actual processor and Markdown/DOM path with a deterministic chunk clock and simulated tab visibility. The final-code comparison runs baseline/current/current/baseline using Chromium's `threadTicks` performance clock to exclude scheduling waits on this shared machine. Background main-thread CPU time averages 2,053 versus 439 ms; foreground preview counts remain 125 and CPU averages differ by 0.14% (2,114 versus 2,117 ms). A separate comparison before and after the stream safety fixes also found no CPU regression. Elapsed-time measurements varied with other workloads, so they are not used to claim a foreground speed change. Every chunk, token event, final message, reasoning field, tool call, and final flush is checked; these numbers do not measure provider throughput. Additional regressions exercise real generation and tool invocation for short reasoning-only streams, plus connection and renderer failures without repeated completion events. A 200,000-message neutral-chat restore also verifies the shared array's identity and every message's position.
 
 Thumbnail I/O counts are measured separately from timing; five alternating rounds compare identical output hashes. The images use one-pixel PNGs with large ancillary chunks and synthetic animated WebP headers, so they demonstrate reduced reads rather than a general high-resolution decoding speedup. Template results use baseline/current/current/baseline with real HTML, injected response delay, and identical message data; they measure only template initialization. These comparisons use `46c47c5b0` target modules with current supporting code, except the token-cache benchmark, which directly reproduces the old whole-object storage operations.
 
@@ -166,14 +166,18 @@ A related backend audit fixed concurrent tokenizer initialization: controlled mo
 
 The reference's complete chat virtualization, deferred extension initialization, and panel DOM parking need broader compatibility work. Directly applying its message `content-visibility` CSS failed a browser probe: ordinary scrolling and loading more messages worked, but jumps to messages 25 and 100 were displaced by roughly 3,400 pixels. That style is therefore not enabled here.
 
+A separate startup experiment compared module preloading in 16 fresh-context navigations, locally and with 50 ms latency / 10 Mbps throughput. Both preload candidates made remote startup and first-contentful paint slower in that fixture, despite unchanged initialization order and no duplicate downloads. No preload tags were added.
+
 Reproduce the browser and I/O comparisons in isolated fixtures:
 
 ```sh
 ST_BASE_URL=http://127.0.0.1:18347 node tests/bench-token-cache.mjs
-ST_BASE_URL=http://127.0.0.1:18347 node tests/bench-streaming-preview.mjs
+ST_BASE_URL=http://127.0.0.1:18347 BENCHMARK_TIME_DOMAIN=threadTicks node tests/bench-streaming-preview.mjs
 ST_BASE_URL=http://127.0.0.1:18347 node tests/bench-startup-templates.mjs
 node tests/bench-thumbnail-header.mjs
 ```
+
+The streaming report declares the clock used for `taskMs`. With `threadTicks` it reports main-thread CPU duration; the default `timeTicks` reports elapsed task duration. `workMs` always measures elapsed execution time, including scheduling contention.
 
 ## Resources
 

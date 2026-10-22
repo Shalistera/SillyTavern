@@ -5,6 +5,8 @@ import { runStreamingScenario, setupStreamingFixture } from './util/streaming-fi
 
 const baseURL = process.env.ST_BASE_URL || 'http://127.0.0.1:18349';
 const baseline = process.env.ST_STREAMING_BASELINE || '46c47c5b0';
+const taskTimeDomain = process.env.BENCHMARK_TIME_DOMAIN || 'timeTicks';
+assert.ok(['timeTicks', 'threadTicks'].includes(taskTimeDomain), 'BENCHMARK_TIME_DOMAIN must be timeTicks or threadTicks');
 const browser = await chromium.launch({ headless: true });
 const rows = [];
 let expectedFinal;
@@ -13,7 +15,7 @@ try {
         const page = await browser.newPage({ baseURL });
         await setupStreamingFixture(page, { baseline: version === 'baseline' ? baseline : undefined });
         const client = await page.context().newCDPSession(page);
-        await client.send('Performance.enable');
+        await client.send('Performance.enable', { timeDomain: taskTimeDomain });
         for (const hidden of [false, true]) {
             const before = await client.send('Performance.getMetrics');
             const result = await page.evaluate(runStreamingScenario, { hidden, count: 500, wordsPerChunk: 4 });
@@ -39,7 +41,8 @@ try {
     }
     const report = {
         baseline,
-        method: 'ABBA, same current supporting modules; actual StreamingProcessor and Markdown/DOM path, deterministic 100 chunks/second over five simulated seconds, document.hidden overridden. workMs measures execution, not provider/wall-clock streaming latency.',
+        taskTimeDomain,
+        method: 'ABBA, same current supporting modules; actual StreamingProcessor and Markdown/DOM path, deterministic 100 chunks/second over five simulated seconds, document.hidden overridden. workMs measures wall-clock execution time including scheduling contention, not provider streaming latency. taskMs uses the declared CDP taskTimeDomain: timeTicks for elapsed task duration or threadTicks for thread CPU duration.',
         rows,
     };
     await fs.writeFile(process.env.BENCHMARK_OUTPUT || '/tmp/csilly-streaming-preview-benchmark.json', JSON.stringify(report, null, 2));
