@@ -75,6 +75,29 @@ function getOriginalFolder(directories, type) {
 }
 
 /**
+ * Reads only the bytes inspected by the existing PNG/WebP animation detectors.
+ * Inspired by TauriTavern's bounded image-header reads (AGPL-3.0):
+ * https://github.com/Darkatse/TauriTavern/blob/edf728b67337eb45c82bbe5a13151d901cd74f4a/src-tauri/crates/tt-adapter-media/src/persistence/thumbnail_cache.rs#L115-L145
+ * @param {string} filePath Original image path
+ * @returns {Buffer} At most 200 bytes, retaining the existing detection boundary
+ */
+function readAnimationHeader(filePath) {
+    const descriptor = fs.openSync(filePath, 'r');
+    try {
+        const buffer = Buffer.alloc(200);
+        let bytesRead = 0;
+        while (bytesRead < buffer.length) {
+            const count = fs.readSync(descriptor, buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+            if (count === 0) break;
+            bytesRead += count;
+        }
+        return buffer.subarray(0, bytesRead);
+    } finally {
+        fs.closeSync(descriptor);
+    }
+}
+
+/**
  * Removes the generated thumbnail from the disk.
  * @param {import('../users.js').UserDirectoryList} directories User directories
  * @param {ThumbnailType} type Type of the thumbnail
@@ -151,7 +174,7 @@ export async function generateThumbnail(directories, type, file, forceGenerate =
         // For WebP files, we must check if they are animated, as Jimp cannot process them.
         // If isKnownAnimated is false, we assume the caller knows it is static and skip this check.
         if (fileExtension === '.webp' && isKnownAnimated !== false) {
-            const buffer = fs.readFileSync(pathToOriginalFile);
+            const buffer = readAnimationHeader(pathToOriginalFile);
             const isAnimated = isAnimatedWebP(buffer);
             if (isAnimated) {
                 // The client is expected to handle it.
@@ -161,7 +184,7 @@ export async function generateThumbnail(directories, type, file, forceGenerate =
 
         // For PNG files, check if they are actually APNGs.
         if (fileExtension === '.png' && isKnownAnimated !== false) {
-            const buffer = fs.readFileSync(pathToOriginalFile);
+            const buffer = readAnimationHeader(pathToOriginalFile);
             const isAnimated = isAnimatedApng(buffer);
             if (isAnimated) {
                 // The client is expected to handle it.
