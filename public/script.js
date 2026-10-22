@@ -1535,37 +1535,77 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     console.info(`Rendered ${targetChat.length - startIndex} messages in ${((performance.now() - t1) / 1000).toFixed(3)} seconds.`);
 }
 
+/** @type {(() => void) | null} */
+let cancelPendingMediaLoadScroll = null;
+
 export function scrollOnMediaLoad() {
+    cancelPendingMediaLoadScroll?.();
+
+    const MAX_DELAY = 1000; // 1 second
     const started = Date.now();
     const media = chatElement.find('.mes_block img, .mes_block video, .mes_block audio').toArray();
+    if (media.length === 0) {
+        return;
+    }
+
+    const pending = new Map();
     let mediaLoaded = 0;
+    let active = true;
+    const timeout = setTimeout(cleanup, MAX_DELAY);
+    cancelPendingMediaLoadScroll = cleanup;
 
     for (const currentElement of media) {
-        if (currentElement instanceof HTMLImageElement) {
-            if (currentElement.complete) {
-                incrementAndCheck();
-            } else {
-                currentElement.addEventListener('load', incrementAndCheck);
-                currentElement.addEventListener('error', incrementAndCheck);
-            }
+        if (!active) {
+            break;
         }
-        if (currentElement instanceof HTMLMediaElement) {
-            if (currentElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-                incrementAndCheck();
-            } else {
-                currentElement.addEventListener('loadeddata', incrementAndCheck);
-                currentElement.addEventListener('error', incrementAndCheck);
-            }
+        const isImage = currentElement instanceof HTMLImageElement;
+        if (!isImage && !(currentElement instanceof HTMLMediaElement)) {
+            continue;
+        }
+        const isLoaded = isImage ? currentElement.complete : currentElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+        if (isLoaded) {
+            incrementAndCheck();
+            continue;
+        }
+
+        const event = isImage ? 'load' : 'loadeddata';
+        const onLoad = () => {
+            removeListeners();
+            pending.delete(currentElement);
+            incrementAndCheck();
+        };
+        const removeListeners = () => {
+            currentElement.removeEventListener(event, onLoad);
+            currentElement.removeEventListener('error', onLoad);
+        };
+        pending.set(currentElement, removeListeners);
+        currentElement.addEventListener(event, onLoad);
+        currentElement.addEventListener('error', onLoad);
+    }
+
+    function cleanup() {
+        active = false;
+        clearTimeout(timeout);
+        for (const removeListeners of pending.values()) {
+            removeListeners();
+        }
+        pending.clear();
+        if (cancelPendingMediaLoadScroll === cleanup) {
+            cancelPendingMediaLoadScroll = null;
         }
     }
 
     function incrementAndCheck() {
-        const MAX_DELAY = 1000; // 1 second
+        if (!active) {
+            return;
+        }
         if ((Date.now() - started) > MAX_DELAY) {
+            cleanup();
             return;
         }
         mediaLoaded++;
         if (mediaLoaded === media.length) {
+            cleanup();
             scrollChatToBottom({ waitForFrame: true });
         }
     }
