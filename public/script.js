@@ -286,6 +286,8 @@ import { AudioPlayer } from './scripts/audio-player.js';
 import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
 import { MessageFormatter } from './scripts/message-formatter.js';
 import { MarkdownRenderCache, trackMarkdownConverter } from './scripts/util/markdown-cache.js';
+import { replaceArrayContents } from './scripts/util/array-contents.js';
+import { getStreamingRenderInterval, normalizeStreamingFps } from './scripts/util/streaming-render-policy.js';
 import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
@@ -3919,7 +3921,8 @@ class StreamingProcessor {
         this.stoppingStrings = getStoppingStrings(isImpersonate, isContinue, main_api);
 
         try {
-            const sw = new Stopwatch(1000 / power_user.streaming_fps);
+            const configuredFps = normalizeStreamingFps(power_user.streaming_fps);
+            const sw = new Stopwatch(getStreamingRenderInterval({ configuredFps, hidden: document.hidden }));
             const timestamps = [];
             for await (const { text, swipes, logprobs, toolCalls, state } of this.generator()) {
                 const now = Date.now();
@@ -3942,6 +3945,7 @@ class StreamingProcessor {
                 this.images = state?.images ?? [];
                 this.reasoningSignature = state?.signature ?? null;
                 await eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text);
+                sw.interval = getStreamingRenderInterval({ configuredFps, hidden: document.hidden });
                 await sw.tick(async () => await this.onProgressStreaming(this.messageId, this.continueMessage + text));
             }
             const seconds = (timestamps[timestamps.length - 1] - timestamps[0]) / 1000;
@@ -7704,7 +7708,7 @@ export async function getChat() {
             /** @type {ChatHeader} */
             const chatHeader = data.shift();
             chat_metadata = chatHeader?.chat_metadata ?? {};
-            chat.splice(0, chat.length, ...data);
+            replaceArrayContents(chat, data);
             chat.forEach(ensureMessageMediaIsArray);
         } else {
             // An empty/corrupted chat file

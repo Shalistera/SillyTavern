@@ -56,6 +56,7 @@ import { renderTemplateAsync } from './templates.js';
 import { t } from './i18n.js';
 import { humanizedDateTime } from './RossAscends-mods.js';
 import { accountStorage } from './util/AccountStorage.js';
+import { replaceArrayContents } from './util/array-contents.js';
 import { MEDIA_DISPLAY, MEDIA_SOURCE, MEDIA_TYPE, SCROLL_BEHAVIOR, SWIPE_DIRECTION } from './constants.js';
 
 /**
@@ -1873,7 +1874,7 @@ export function restoreNeutralChat() {
     }
 
     const { chat: neutralChatData, chat_metadata: neutralChatMetadata } = JSON.parse(neutralChat);
-    chat.splice(0, chat.length, ...neutralChatData);
+    replaceArrayContents(chat, neutralChatData);
     updateChatMetadata(neutralChatMetadata, true);
     sessionStorage.removeItem(NEUTRAL_CHAT_KEY);
 }
@@ -2164,7 +2165,7 @@ export function initChatUtilities() {
                 const metadata = messages.shift()?.chat_metadata || {};
                 messages.unshift(getSystemMessageByType(system_message_types.ASSISTANT_NOTE));
                 await clearChat();
-                chat.splice(0, chat.length, ...messages);
+                replaceArrayContents(chat, messages);
                 updateChatMetadata(metadata, true);
                 await printMessages();
             } catch (error) {

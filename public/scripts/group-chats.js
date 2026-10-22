@@ -86,6 +86,7 @@ import { isExternalMediaAllowed } from './chats.js';
 import { POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
+import { replaceArrayContents } from './util/array-contents.js';
 import { compressRequest } from './request-compression.js';
 
 export {
@@ -303,7 +304,7 @@ export async function getGroupChat(groupId, reload = false) {
         }
         await saveGroupChat(groupId, false);
     } else if (Array.isArray(data) && data.length) {
-        chat.splice(0, chat.length, ...data);
+        replaceArrayContents(chat, data);
         chat.forEach(ensureMessageMediaIsArray);
         chatElement.find('.mes').remove();
         await printMessages();
