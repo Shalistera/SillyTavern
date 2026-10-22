@@ -20,6 +20,8 @@
 
 import { SVGInject } from '../lib.js';
 import { t } from './i18n.js';
+import { MarkdownRenderCache } from './util/markdown-cache.js';
+import { createStreamingContentUpdater } from './util/stream-fadein.js';
 import { animation_duration, messageFormatting } from '/script.js';
 
 /** CSS class prefix */
@@ -33,6 +35,10 @@ const CSS_PREFIX = 'streaming-display';
  */
 
 export class StreamingDisplay {
+    #reasoningMarkdownCache = new MarkdownRenderCache();
+    #textMarkdownCache = new MarkdownRenderCache();
+    #updateReasoningContent = createStreamingContentUpdater();
+    #updateTextContent = createStreamingContentUpdater();
     /** @type {HTMLElement | null} */
     #element = null;
     /** @type {HTMLElement | null} */
@@ -262,7 +268,8 @@ export class StreamingDisplay {
         if (!this.#reasoningContent || !this.#reasoningSection || !text) return this;
 
         this.#reasoningSection.style.display = '';
-        this.#reasoningContent.innerHTML = messageFormatting(text, '', false, false, -1, {}, true);
+        const html = messageFormatting(text, '', false, false, -1, {}, true, this.#reasoningMarkdownCache);
+        this.#updateReasoningContent(this.#reasoningContent, html, false);
         this.#reasoningContent.scrollTop = this.#reasoningContent.scrollHeight;
         return this;
     }
@@ -278,7 +285,8 @@ export class StreamingDisplay {
 
         this.#hasContent = true;
         this.#textSection.style.display = '';
-        this.#textContent.innerHTML = messageFormatting(text, '', false, false, -1, {}, false);
+        const html = messageFormatting(text, '', false, false, -1, {}, false, this.#textMarkdownCache);
+        this.#updateTextContent(this.#textContent, html, false);
         this.#textContent.scrollTop = this.#textContent.scrollHeight;
         return this;
     }
@@ -394,6 +402,13 @@ export class StreamingDisplay {
         if (!this.#element) return;
 
         const el = this.#element;
+
+        this.#reasoningMarkdownCache.clear();
+        this.#textMarkdownCache.clear();
+        // Release detached DOM references and start fresh when this instance is
+        // shown again, even if the next generation has identical initial text.
+        this.#updateReasoningContent = createStreamingContentUpdater();
+        this.#updateTextContent = createStreamingContentUpdater();
 
         // Clear all private fields
         this.#element = null;
